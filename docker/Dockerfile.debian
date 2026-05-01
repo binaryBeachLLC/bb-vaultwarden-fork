@@ -116,7 +116,11 @@ COPY ./macros ./macros
 ARG CARGO_PROFILE=release
 
 # Configure the DB ARG as late as possible to not invalidate the cached layers above
-ARG DB=sqlite,mysql,postgresql
+# binarybeachio: enable `s3` Cargo feature so DATA_FOLDER can point at an
+# S3-compatible bucket (Cloudflare R2 in our deploy). Pulls in opendal +
+# aws-config + reqsign at build time. Inert at runtime when DATA_FOLDER is a
+# local path. See bb-vaultwarden-fork/BINARYBEACHIO.md.
+ARG DB=sqlite,mysql,postgresql,s3
 
 # Builds your dependencies and removes the
 # dummy project, except the target folder
@@ -190,6 +194,16 @@ WORKDIR /
 COPY docker/healthcheck.sh docker/start.sh /
 
 COPY --from=vault /web-vault ./web-vault
+
+# binarybeachio: rebrand the SSO login button "Use single sign-on" →
+# "Sign in with BinaryBeach.io" in the web-vault's English locale (other
+# locales unchanged). The pre/post grep checks fail the build if upstream
+# restructures the i18n key, surfacing the breakage instead of silently
+# shipping the upstream label. See bb-vaultwarden-fork/BINARYBEACHIO.md.
+RUN grep -q '"message": "Use single sign-on"' /web-vault/locales/en/messages.json && \
+    sed -i 's|"message": "Use single sign-on"|"message": "Sign in with BinaryBeach.io"|g' /web-vault/locales/en/messages.json && \
+    grep -q '"message": "Sign in with BinaryBeach.io"' /web-vault/locales/en/messages.json
+
 COPY --from=build /app/target/final/vaultwarden .
 
 HEALTHCHECK --interval=60s --timeout=10s CMD ["/healthcheck.sh"]
