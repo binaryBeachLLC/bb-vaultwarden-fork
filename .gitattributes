@@ -1,2 +1,13 @@
 # Ignore vendored scripts in GitHub stats
 src/static/scripts/* linguist-vendored
+
+# binarybeachio: shell scripts and Jinja templates that get executed
+# (or sed'd into) inside the Linux container build MUST stay LF-terminated,
+# regardless of the cloning host's core.autocrlf setting. Without this, a
+# Windows clone with core.autocrlf=true converts these to CRLF, the shebang
+# on shell scripts becomes `#!/bin/sh\r` (invalid path), and the container
+# crashloops with `exec /start.sh: no such file or directory`. Burned
+# 2026-04-30 on first deploy of bb-vaultwarden-fork.
+*.sh text eol=lf
+*.j2 text eol=lf
+Dockerfile* text eol=lf
