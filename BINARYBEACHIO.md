@@ -1,9 +1,12 @@
 # bb-vaultwarden-fork — binarybeachio Vaultwarden fork
 
-This is the binarybeachio fork of [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (an unofficial Bitwarden-compatible server in Rust). The fork exists for two reasons, both implemented entirely in build configuration with zero `.rs` source touched:
+This is the binarybeachio fork of [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (an unofficial Bitwarden-compatible server in Rust). The fork exists for three reasons:
 
 1. **Enable the upstream `s3` Cargo feature** so `DATA_FOLDER` can point at Cloudflare R2 instead of a local Docker volume. The feature is already in upstream's source — the official `vaultwarden/server` image just doesn't ship it. We flip one build flag.
 2. **Rebrand the SSO login button** "Use single sign-on" → "Sign in with BinaryBeach.io" in the bundled web-vault's English locale, per the binarybeachio cross-fork convention ([`docs/architecture/customizations.md` → "User-visible SSO label"](https://git.binarybeach.io/binarybeach/binarybeachio/src/branch/main/docs/architecture/customizations.md)).
+3. **Env-drive the default S3 storage class** — upstream hardcodes `INTELLIGENT_TIERING` (AWS-specific); Cloudflare R2 rejects it with `InvalidStorageClass`. Patch reads `DATA_FOLDER_S3_STORAGE_CLASS` env, defaults to `STANDARD` (universal — no-op on R2 and AWS).
+
+Patches 1 and 2 are build-config only (zero `.rs` touched). Patch 3 is a small `.rs` change (~6 lines in `src/config.rs::opendal_s3_operator_for_path`).
 
 If you're reading this on a future merge from upstream, the [Refresh from upstream](#refresh-from-upstream) section is the playbook.
 
@@ -16,8 +19,16 @@ If you're reading this on a future merge from upstream, the [Refresh from upstre
 | Project | Vaultwarden (Bitwarden-compatible server in Rust, formerly bitwarden_rs) |
 | Upstream repo | https://github.com/dani-garcia/vaultwarden |
 | Upstream default branch | `main` |
-| Currently integrated upstream version | **1.35.8** (released 2026-04-25 by upstream) |
+| Currently integrated upstream version | **1.35.8** (released 2026-04-25 by upstream) — current built tag `v1.35.8-mine.3` |
 | License | [AGPL-3.0](https://github.com/dani-garcia/vaultwarden/blob/main/LICENSE.txt). The push-mirror to `github.com/binarybeachllc/bb-vaultwarden-fork` (public) plus the public Forgejo repo at `git.binarybeach.io/binarybeach/bb-vaultwarden-fork` together satisfy AGPL §13's source-disclosure obligation for network use. |
+
+### Tag history (don't roll back to `mine.1` or `mine.2` — both broken on arrival)
+
+| Tag | Status | What was wrong |
+|---|---|---|
+| `v1.35.8-mine.1` | broken | Built on Windows; `core.autocrlf=true` left `docker/start.sh` and `docker/healthcheck.sh` with CRLF line endings. Container's CMD was `/start.sh`; kernel saw shebang `#!/bin/sh\r`, tried to exec `/bin/sh\r`, failed with the misleading `exec /start.sh: no such file or directory` and crashlooped. |
+| `v1.35.8-mine.2` | broken | LF fix landed (`.gitattributes` pinning `*.sh` to LF), container started, but OpenDAL's `S3::default()` builder errored at runtime with `region is missing` (only reads `AWS_REGION`, not `AWS_DEFAULT_REGION` like the AWS SDK chain does). Compose now sets both. AND a second problem surfaced: `INTELLIGENT_TIERING` storage class hardcoded in upstream is rejected by R2. |
+| `v1.35.8-mine.3` | active | Both fixed: compose passes `AWS_REGION` + `AWS_ENDPOINT_URL` (in addition to the `*_DEFAULT_REGION` / `*_S3` variants), and `src/config.rs` now reads `DATA_FOLDER_S3_STORAGE_CLASS` env defaulting to `STANDARD`. |
 
 `git log main..upstream` = upstream changes I haven't pulled in
 `git log upstream..main` = binarybeachio's customizations
@@ -63,20 +74,22 @@ The button label rebrand is binarybeachio-specific branding; not generally usefu
 
 ## What's customized
 
-Three files, one .j2 template + the two Dockerfiles it generates. Total: ~30 lines added across the three files, zero `.rs` source touched.
+Five files: one `.gitattributes`, the .j2 template + two generated Dockerfiles, and one `.rs`. Total: ~50 lines added.
 
 | File | Change | Lines | Conflict risk on upgrade |
 |------|--------|-------|--------------------------|
+| `.gitattributes` | Append `*.sh text eol=lf`, `*.j2 text eol=lf`, `Dockerfile* text eol=lf`. Pre-flight requirement on every fork built from a Windows host (autocrlf=true would otherwise break shell-script shebangs in the runtime image). | +11 | **Low** — additive to upstream's existing rules. |
 | `docker/Dockerfile.j2` | (a) Append `,s3` to `ARG DB=` for both alpine and debian branches. (b) Insert `RUN grep + sed + grep` rebrand step after `COPY --from=vault`. | +14 | **Low** — both edits sit in lines that rarely change; the rebrand RUN is purely additive. |
 | `docker/Dockerfile.alpine` | Same edits as `.j2`, applied to the generated alpine variant. | +14 | **Low** — must stay in sync with `.j2`; if upstream regenerates from the template our edits regenerate too (we patch the template *and* the generated files). |
 | `docker/Dockerfile.debian` | Same edits as `.j2`, applied to the generated debian variant. | +14 | **Low** — same as alpine. |
+| `src/config.rs` | In `opendal_s3_operator_for_path`, read `DATA_FOLDER_S3_STORAGE_CLASS` env (default `"STANDARD"`); skip the `.default_storage_class()` call when the env value is empty. Was hardcoded `"INTELLIGENT_TIERING"` (AWS-only; R2 rejects). | +14, -3 | **Medium** — this builder chain is small and stable, but a shape-change upstream (e.g. switching to a builder pattern that takes a config struct) would force a re-port. The patch is bracketed by clear `binarybeachio:` comment so future-self spots it on conflict. |
 
 Files **not** changed (deliberately):
-- Any `.rs` file in `src/` — zero source code modified. The `s3` feature is purely a Cargo build-flag activation; the SSO rebrand is a runtime-stage `sed` on a built artifact.
+- Any `.rs` file other than `src/config.rs` — only the storage-class line. The `s3` feature is a Cargo build-flag activation; the SSO rebrand is a runtime-stage `sed` on a built artifact.
 - `docker/DockerSettings.yaml` — version pins for the web-vault and Rust toolchain; we follow upstream's choices here. Bump only when refreshing from upstream.
 - `Cargo.toml` / `Cargo.lock` — the `s3` feature already exists in upstream's manifest; we just enable it at build time.
 
-**Inert when not used.** The `s3` feature only activates when `DATA_FOLDER` (or per-folder envs) starts with `s3://`. With local paths, the runtime is bit-for-bit identical to upstream's behavior. The SSO rebrand only renders in the English locale; non-English users see upstream's translations.
+**Inert when not used.** The `s3` feature only activates when `DATA_FOLDER` (or per-folder envs) starts with `s3://`. With local paths, the runtime is bit-for-bit identical to upstream's behavior. The SSO rebrand only renders in the English locale; non-English users see upstream's translations. The storage-class env defaults to `STANDARD` (no-op on AWS S3, accepted by R2) — operators wanting upstream's `INTELLIGENT_TIERING` set `DATA_FOLDER_S3_STORAGE_CLASS=INTELLIGENT_TIERING` explicitly.
 
 ## Required runtime config
 
