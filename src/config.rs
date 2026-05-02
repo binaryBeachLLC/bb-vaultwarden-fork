@@ -1440,12 +1440,23 @@ fn opendal_s3_operator_for_path(path: &str) -> Result<opendal::Operator, Error> 
 
     let bucket = url.host_str().ok_or_else(|| format!("Missing Bucket name in data folder S3 URL {path:?}"))?;
 
-    let builder = opendal::services::S3::default()
+    let mut builder = opendal::services::S3::default()
         .customized_credential_load(Box::new(OPEN_DAL_S3_CREDENTIAL_LOADER))
         .enable_virtual_host_style()
         .bucket(bucket)
-        .root(url.path())
-        .default_storage_class("INTELLIGENT_TIERING");
+        .root(url.path());
+
+    // binarybeachio: upstream hardcodes "INTELLIGENT_TIERING" which is
+    // AWS-specific; Cloudflare R2 rejects it with InvalidStorageClass.
+    // Default to "STANDARD" (accepted by R2 and AWS), and let operators
+    // override or omit via DATA_FOLDER_S3_STORAGE_CLASS env (empty value
+    // skips the header entirely — useful for backends that reject any
+    // storage class header at all).
+    let storage_class = std::env::var("DATA_FOLDER_S3_STORAGE_CLASS")
+        .unwrap_or_else(|_| "STANDARD".to_string());
+    if !storage_class.is_empty() {
+        builder = builder.default_storage_class(&storage_class);
+    }
 
     Ok(opendal::Operator::new(builder)?.finish())
 }
