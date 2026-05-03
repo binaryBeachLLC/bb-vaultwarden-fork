@@ -204,6 +204,19 @@ RUN grep -q '"message": "Use single sign-on"' /web-vault/locales/en/messages.jso
     sed -i 's|"message": "Use single sign-on"|"message": "Sign in with BinaryBeach.io"|g' /web-vault/locales/en/messages.json && \
     grep -q '"message": "Sign in with BinaryBeach.io"' /web-vault/locales/en/messages.json
 
+# binarybeachio Patch 4: inject SSO auto-fill+auto-submit script into the
+# web vault's index.html. Upstream Bitwarden's SSO route /#/sso requires a
+# non-empty "organization identifier" before redirecting; Vaultwarden's
+# server-wide SSO accepts any value, so we silently auto-fill and submit.
+# Surfaces the SSO flow as a single click for the user. The pre/post grep
+# checks fail the build if the injection point disappears.
+COPY docker/sso-autofill.html /tmp/sso-autofill.html
+RUN grep -q '</body>' /web-vault/index.html && \
+    awk 'BEGIN{f="/tmp/sso-autofill.html"; while ((getline l < f) > 0) inject = inject l "\n"} {sub(/<\/body>/, inject "&"); print}' /web-vault/index.html > /tmp/index.html.new && \
+    mv /tmp/index.html.new /web-vault/index.html && \
+    grep -q 'binarybeachio: auto-fill' /web-vault/index.html && \
+    rm /tmp/sso-autofill.html
+
 COPY --from=build /app/target/final/vaultwarden .
 
 HEALTHCHECK --interval=60s --timeout=10s CMD ["/healthcheck.sh"]

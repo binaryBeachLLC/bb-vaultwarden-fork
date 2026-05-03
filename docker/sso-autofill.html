@@ -1,0 +1,43 @@
+<script>
+// binarybeachio: auto-fill + auto-submit Vaultwarden's SSO identifier form.
+// Upstream Bitwarden's web vault requires a non-empty "organization
+// identifier" before redirecting to the IdP — a relic of cloud Bitwarden's
+// per-org SSO model. Vaultwarden's server-wide SSO accepts any non-empty
+// value (the value is just an opaque token; Vaultwarden routes everyone
+// through the same SSO_CLIENT_ID/SSO_AUTHORITY). This script makes the
+// flow feel native: when the user lands on /#/sso, we fill the identifier
+// with a stable default ("binarybeach.io") and click submit, so they go
+// straight to Zitadel without seeing the form.
+//
+// See bb-vaultwarden-fork/BINARYBEACHIO.md Patch 4.
+(function () {
+  var DEFAULT_IDENTIFIER = "binarybeach.io";
+  var lastSubmittedFor = null;
+
+  function tryAutoSubmit() {
+    if (location.hash.indexOf("#/sso") !== 0) {
+      lastSubmittedFor = null;
+      return;
+    }
+    if (lastSubmittedFor === location.hash) return;
+    var input = document.querySelector(
+      'input[name="identifier"], input[formcontrolname="identifier"], input[id*="identifier"]'
+    );
+    var btn = document.querySelector('button[type="submit"], button.bit-button[type="submit"]');
+    if (!input || !btn) return;
+    if (!input.value) {
+      input.value = DEFAULT_IDENTIFIER;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    if (btn.disabled) return;
+    lastSubmittedFor = location.hash;
+    btn.click();
+  }
+
+  // The web vault is an Angular SPA; the SSO form mounts asynchronously
+  // after the route resolves. Polling at 250ms catches the form within
+  // one tick of it being painted, well below human perceptibility.
+  setInterval(tryAutoSubmit, 250);
+})();
+</script>
