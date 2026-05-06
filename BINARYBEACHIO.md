@@ -1,12 +1,14 @@
 # bb-vaultwarden-fork — binarybeachio Vaultwarden fork
 
-This is the binarybeachio fork of [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (an unofficial Bitwarden-compatible server in Rust). The fork exists for three reasons:
+This is the binarybeachio fork of [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (an unofficial Bitwarden-compatible server in Rust). The fork exists for five reasons:
 
 1. **Enable the upstream `s3` Cargo feature** so `DATA_FOLDER` can point at Cloudflare R2 instead of a local Docker volume. The feature is already in upstream's source — the official `vaultwarden/server` image just doesn't ship it. We flip one build flag.
 2. **Rebrand the SSO login button** "Use single sign-on" → "Sign in with BinaryBeach.io" in the bundled web-vault's English locale, per the binarybeachio cross-fork convention ([`docs/architecture/customizations.md` → "User-visible SSO label"](https://git.binarybeach.io/binarybeach/binarybeachio/src/branch/main/docs/architecture/customizations.md)).
 3. **Env-drive the default S3 storage class** — upstream hardcodes `INTELLIGENT_TIERING` (AWS-specific); Cloudflare R2 rejects it with `InvalidStorageClass`. Patch reads `DATA_FOLDER_S3_STORAGE_CLASS` env, defaults to `STANDARD` (universal — no-op on R2 and AWS).
+4. **SSO identifier auto-fill** — upstream Bitwarden's web vault requires a non-empty "organization identifier" on `/#/sso` before redirecting to the IdP. Vaultwarden's server-wide SSO accepts any non-empty value; the field is opaque on a single-org self-host. Patch injects a small `<script>` into the runtime-stage web vault that detects `/#/sso` and auto-submits with `binarybeach.io`.
+5. **Read four-layer-identity `bb_mailbox` claim** — per the binarybeachio platform's [four-layer identity model](https://git.binarybeach.io/binarybeach/binarybeachio/src/branch/main/docs/architecture/multi-tenant-identity.md#4-identity-mailbox-and-tenant-domain--the-four-layer-model), the Zitadel `bb-claims` Action emits a derived `bb_mailbox` claim into the ID token. Patch extracts it via `jsonwebtoken::dangerous::insecure_decode` of the raw JWT (safe — already verified by openidconnect's typed claims earlier in the same `exchange_code` path) and prefers it over `email` for the user-keying step. Inert when the claim is absent (non-Zitadel IdPs, pre-Track-1 deploys).
 
-Patches 1 and 2 are build-config only (zero `.rs` touched). Patch 3 is a small `.rs` change (~6 lines in `src/config.rs::opendal_s3_operator_for_path`).
+Patches 1, 2, 4 are build-config only (zero `.rs` touched). Patches 3 and 5 are small `.rs` changes (~6 lines in `src/config.rs::opendal_s3_operator_for_path`; ~30 lines in `src/sso.rs::exchange_code`).
 
 If you're reading this on a future merge from upstream, the [Refresh from upstream](#refresh-from-upstream) section is the playbook.
 
@@ -19,7 +21,7 @@ If you're reading this on a future merge from upstream, the [Refresh from upstre
 | Project | Vaultwarden (Bitwarden-compatible server in Rust, formerly bitwarden_rs) |
 | Upstream repo | https://github.com/dani-garcia/vaultwarden |
 | Upstream default branch | `main` |
-| Currently integrated upstream version | **1.35.8** (released 2026-04-25 by upstream) — current built tag `v1.35.8-mine.3` |
+| Currently integrated upstream version | **1.35.8** (released 2026-04-25 by upstream) — current built tag `v1.35.8-mine.5` (Patch 5 — bb_mailbox claim consumption) |
 | License | [AGPL-3.0](https://github.com/dani-garcia/vaultwarden/blob/main/LICENSE.txt). The push-mirror to `github.com/binarybeachllc/bb-vaultwarden-fork` (public) plus the public Forgejo repo at `git.binarybeach.io/binarybeach/bb-vaultwarden-fork` together satisfy AGPL §13's source-disclosure obligation for network use. |
 
 ### Tag history (don't roll back to `mine.1` or `mine.2` — both broken on arrival)
@@ -28,7 +30,9 @@ If you're reading this on a future merge from upstream, the [Refresh from upstre
 |---|---|---|
 | `v1.35.8-mine.1` | broken | Built on Windows; `core.autocrlf=true` left `docker/start.sh` and `docker/healthcheck.sh` with CRLF line endings. Container's CMD was `/start.sh`; kernel saw shebang `#!/bin/sh\r`, tried to exec `/bin/sh\r`, failed with the misleading `exec /start.sh: no such file or directory` and crashlooped. |
 | `v1.35.8-mine.2` | broken | LF fix landed (`.gitattributes` pinning `*.sh` to LF), container started, but OpenDAL's `S3::default()` builder errored at runtime with `region is missing` (only reads `AWS_REGION`, not `AWS_DEFAULT_REGION` like the AWS SDK chain does). Compose now sets both. AND a second problem surfaced: `INTELLIGENT_TIERING` storage class hardcoded in upstream is rejected by R2. |
-| `v1.35.8-mine.3` | active | Both fixed: compose passes `AWS_REGION` + `AWS_ENDPOINT_URL` (in addition to the `*_DEFAULT_REGION` / `*_S3` variants), and `src/config.rs` now reads `DATA_FOLDER_S3_STORAGE_CLASS` env defaulting to `STANDARD`. |
+| `v1.35.8-mine.3` | superseded | Both fixed: compose passes `AWS_REGION` + `AWS_ENDPOINT_URL` (in addition to the `*_DEFAULT_REGION` / `*_S3` variants), and `src/config.rs` now reads `DATA_FOLDER_S3_STORAGE_CLASS` env defaulting to `STANDARD`. |
+| `v1.35.8-mine.4` | superseded | Adds Patch 4: SSO identifier auto-fill — kills the per-login "organization identifier" friction on the web vault's `/#/sso` page. Web-vault HTML script injection in the Dockerfile runtime stage; zero source code touched. |
+| `v1.35.8-mine.5` | active | Adds Patch 5: bb_mailbox claim consumption for the binarybeachio four-layer identity model rollout (T2.5 / 2026-05-05). Single-file edit in `src/sso.rs::exchange_code` reading the claim from the raw ID token JWT via `jsonwebtoken::insecure_decode` (already-verified token; safe). Falls back to `email` when claim absent. |
 
 `git log main..upstream` = upstream changes I haven't pulled in
 `git log upstream..main` = binarybeachio's customizations
@@ -74,22 +78,24 @@ The button label rebrand is binarybeachio-specific branding; not generally usefu
 
 ## What's customized
 
-Five files: one `.gitattributes`, the .j2 template + two generated Dockerfiles, and one `.rs`. Total: ~50 lines added.
+Six files: one `.gitattributes`, the .j2 template + two generated Dockerfiles, one auto-fill HTML asset, and two `.rs` files. Total: ~145 lines added across patches 1–5.
 
 | File | Change | Lines | Conflict risk on upgrade |
 |------|--------|-------|--------------------------|
 | `.gitattributes` | Append `*.sh text eol=lf`, `*.j2 text eol=lf`, `Dockerfile* text eol=lf`. Pre-flight requirement on every fork built from a Windows host (autocrlf=true would otherwise break shell-script shebangs in the runtime image). | +11 | **Low** — additive to upstream's existing rules. |
-| `docker/Dockerfile.j2` | (a) Append `,s3` to `ARG DB=` for both alpine and debian branches. (b) Insert `RUN grep + sed + grep` rebrand step after `COPY --from=vault`. | +14 | **Low** — both edits sit in lines that rarely change; the rebrand RUN is purely additive. |
-| `docker/Dockerfile.alpine` | Same edits as `.j2`, applied to the generated alpine variant. | +14 | **Low** — must stay in sync with `.j2`; if upstream regenerates from the template our edits regenerate too (we patch the template *and* the generated files). |
-| `docker/Dockerfile.debian` | Same edits as `.j2`, applied to the generated debian variant. | +14 | **Low** — same as alpine. |
-| `src/config.rs` | In `opendal_s3_operator_for_path`, read `DATA_FOLDER_S3_STORAGE_CLASS` env (default `"STANDARD"`); skip the `.default_storage_class()` call when the env value is empty. Was hardcoded `"INTELLIGENT_TIERING"` (AWS-only; R2 rejects). | +14, -3 | **Medium** — this builder chain is small and stable, but a shape-change upstream (e.g. switching to a builder pattern that takes a config struct) would force a re-port. The patch is bracketed by clear `binarybeachio:` comment so future-self spots it on conflict. |
+| `docker/Dockerfile.j2` | (a) Append `,s3` to `ARG DB=` for both alpine and debian branches. (b) Insert `RUN grep + sed + grep` rebrand step after `COPY --from=vault`. (c) Patch 4: COPY `sso-autofill.html` + RUN awk-inject before `</body>`. | +25 | **Low** — both edits sit in lines that rarely change; rebrand and SSO-autofill RUN are purely additive. |
+| `docker/Dockerfile.alpine` | Same edits as `.j2`, applied to the generated alpine variant. | +25 | **Low** — must stay in sync with `.j2`; if upstream regenerates from the template our edits regenerate too. |
+| `docker/Dockerfile.debian` | Same edits as `.j2`, applied to the generated debian variant. | +25 | **Low** — same as alpine. |
+| `docker/sso-autofill.html` (NEW) | Patch 4: ~40-line `<script>` snippet injected into web vault's `index.html`. Detects `/#/sso` navigation, auto-fills "binarybeach.io" identifier, clicks submit. Inert outside `/#/sso`. | +43 | **Low** — file is fully owned by the fork; conflicts impossible. |
+| `src/config.rs` | Patch 3: in `opendal_s3_operator_for_path`, read `DATA_FOLDER_S3_STORAGE_CLASS` env (default `"STANDARD"`); skip the `.default_storage_class()` call when the env value is empty. Was hardcoded `"INTELLIGENT_TIERING"` (AWS-only; R2 rejects). | +14, -3 | **Medium** — this builder chain is small and stable, but a shape-change upstream (e.g. switching to a builder pattern that takes a config struct) would force a re-port. The patch is bracketed by clear `binarybeachio:` comment so future-self spots it on conflict. |
+| `src/sso.rs` | Patch 5: in `exchange_code()`, after `let user_info = ...`, define a local `BbClaimsExtraction` struct with optional `bb_mailbox`, `insecure_decode` it from the raw ID token JWT, and prefer it over `id_claims.email().or(user_info.email())` for the email-resolution match. Fallback path identical to upstream when claim absent. | +30, -3 | **Medium** — the email-resolution match has been stable since v1.35; conflict only if upstream introduces its own custom-claim or `email_field` knob (in which case migrate to that). The `binarybeachio Patch 5:` comment marks the block clearly. |
 
 Files **not** changed (deliberately):
-- Any `.rs` file other than `src/config.rs` — only the storage-class line. The `s3` feature is a Cargo build-flag activation; the SSO rebrand is a runtime-stage `sed` on a built artifact.
+- Any `.rs` file other than `src/config.rs` and `src/sso.rs` — Patch 5 lives entirely in `sso.rs::exchange_code`. The openidconnect `Client` parametrization is intentionally NOT swapped to a custom `AdditionalClaims` type (heavy refactor for one custom claim — see migration-plan.md §3.2 rationale). `src/sso_client.rs` is left at upstream-clean `EmptyAdditionalClaims`.
 - `docker/DockerSettings.yaml` — version pins for the web-vault and Rust toolchain; we follow upstream's choices here. Bump only when refreshing from upstream.
-- `Cargo.toml` / `Cargo.lock` — the `s3` feature already exists in upstream's manifest; we just enable it at build time.
+- `Cargo.toml` / `Cargo.lock` — the `s3` feature already exists in upstream's manifest; we just enable it at build time. Patch 5 uses crates already in `Cargo.toml` (`jsonwebtoken`, `serde`).
 
-**Inert when not used.** The `s3` feature only activates when `DATA_FOLDER` (or per-folder envs) starts with `s3://`. With local paths, the runtime is bit-for-bit identical to upstream's behavior. The SSO rebrand only renders in the English locale; non-English users see upstream's translations. The storage-class env defaults to `STANDARD` (no-op on AWS S3, accepted by R2) — operators wanting upstream's `INTELLIGENT_TIERING` set `DATA_FOLDER_S3_STORAGE_CLASS=INTELLIGENT_TIERING` explicitly.
+**Inert when not used.** The `s3` feature only activates when `DATA_FOLDER` (or per-folder envs) starts with `s3://`. With local paths, the runtime is bit-for-bit identical to upstream's behavior. The SSO rebrand only renders in the English locale; non-English users see upstream's translations. The storage-class env defaults to `STANDARD` (no-op on AWS S3, accepted by R2) — operators wanting upstream's `INTELLIGENT_TIERING` set `DATA_FOLDER_S3_STORAGE_CLASS=INTELLIGENT_TIERING` explicitly. Patch 4's auto-fill script no-ops when not on `/#/sso`. Patch 5's `bb_mailbox` extraction is `Option<String>::None` for any IdP that doesn't emit the claim, falling through to upstream's `email` resolution.
 
 ## Required runtime config
 

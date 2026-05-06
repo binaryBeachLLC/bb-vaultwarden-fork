@@ -276,9 +276,38 @@ pub async fn exchange_code(
 
     let user_info = client.user_info(token_response.access_token().to_owned()).await?;
 
-    let email = match id_claims.email().or(user_info.email()) {
-        None => err!("Neither id token nor userinfo contained an email"),
-        Some(e) => e.to_string().to_lowercase(),
+    // binarybeachio Patch 5: prefer the four-layer-identity `bb_mailbox`
+    // claim over federation `email` when present. Emitted by the platform's
+    // Zitadel `bb-claims` Action into the ID token (via Pre Userinfo
+    // creation trigger). We extract it via `insecure_decode` of the raw
+    // ID token JWT — safe because the same JWT was already cryptographically
+    // verified by `id_token.claims(verifier, nonce)` in sso_client.rs's
+    // `exchange_code`. We're just re-reading one custom claim that the
+    // openidconnect 4.0.1 typed accessor doesn't expose without
+    // re-parameterizing the entire Client (heavy refactor; see
+    // bb-vaultwarden-fork/BINARYBEACHIO.md Patch 5 rationale). Inert when
+    // the claim is absent (non-Zitadel IdP, or platform-tenant misconfig).
+    // Full context at platform repo
+    // docs/architecture/multi-tenant-identity.md §4 +
+    // docs/services/vaultwarden/migration-plan.md §4.
+    #[derive(serde::Deserialize)]
+    struct BbClaimsExtraction {
+        bb_mailbox: Option<String>,
+    }
+    let bb_mailbox: Option<String> = token_response
+        .extra_fields()
+        .id_token()
+        .and_then(|t| jsonwebtoken::dangerous::insecure_decode::<BbClaimsExtraction>(&t.to_string()).ok())
+        .and_then(|td| td.claims.bb_mailbox);
+
+    let email = match bb_mailbox.or_else(|| {
+        id_claims
+            .email()
+            .map(|e| e.to_string())
+            .or_else(|| user_info.email().map(|e| e.to_string()))
+    }) {
+        None => err!("Neither id token, userinfo, nor bb_mailbox contained an email"),
+        Some(e) => e.to_lowercase(),
     };
 
     let email_verified = id_claims.email_verified().or(user_info.email_verified());
